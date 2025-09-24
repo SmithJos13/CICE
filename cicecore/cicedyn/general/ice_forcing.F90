@@ -129,20 +129,22 @@
           wave_spectrum_data ! field values at 2 temporal data points
 
       character(char_len), public :: &
-         atm_data_format   , & ! 'bin'=binary or 'nc'=netcdf
-         ocn_data_format   , & ! 'bin'=binary or 'nc'=netcdf
-         atm_data_type     , & ! 'default', 'monthly', 'ncar', 'box2001'
-                               ! 'hadgem', 'oned', 'calm', 'uniform'
-                               ! 'JRA55' or 'JRA55do'
-         atm_data_version  , & ! date of atm_forcing file creation
-         bgc_data_type     , & ! 'default', 'clim'
-         ocn_data_type     , & ! 'default', 'clim', 'ncar', 'oned', 'calm', 'box2001'
-                               ! 'hadgem_sst' or 'hadgem_sst_uvocn', 'uniform'
-         ice_data_type     , & ! 'latsst', 'box2001', 'boxslotcyl', etc
-         ice_data_conc     , & ! 'p5','p8','p9','c1','parabolic', 'box2001', etc
-         ice_data_dist     , & ! 'box2001','gauss', 'uniform', etc
-         precip_units      , & ! 'mm_per_month', 'mm_per_sec', 'mks','m_per_sec'
-         sea_ice_bry
+         atm_data_format, & ! 'bin'=binary or 'nc'=netcdf
+         ocn_data_format, & ! 'bin'=binary or 'nc'=netcdf
+         atm_data_type, & ! 'default', 'monthly', 'ncar', 'box2001'
+                          ! 'hadgem', 'oned', 'calm', 'uniform'
+                          ! 'JRA55' or 'JRA55do'
+         atm_data_version, & ! data of atm_forcing file creation
+         bgc_data_type, & ! 'default', 'clim'
+         ocn_data_type, & ! 'default', 'clim', 'ncar','ncar_daily','ncar_daily_coupled', 'oned', 'calm', 'box2001'
+                          ! 'hadgem_sst' or 'hadgem_sst_uvocn', 'uniform'
+         ice_data_type, & ! 'latsst', 'box2001', 'boxslotcyl', etc
+         ice_data_conc, & ! 'p5','p8','p9','c1','parabolic', 'box2001', etc
+         ice_data_dist, & ! 'box2001','gauss', 'uniform', etc
+         precip_units , & ! 'mm_per_month', 'mm_per_sec', 'mks','m_per_sec'
+	 !Pedro changes begin
+         sea_ice_bry      ! 'default', 'daily'
+         !Pedro changes end
       logical (kind=log_kind), public :: &
          rotate_wind      ! rotate wind/stress to computational grid from true north directed
 
@@ -165,7 +167,8 @@
          frcidf = 0.17_dbl_kind    ! frac of incoming sw in near IR diffuse band
 
       real (kind=dbl_kind), dimension (:,:,:,:,:), allocatable, public :: &
-         ocn_frc_m   ! ocn data for 12 months
+         ocn_frc_m, &   ! ocn data for 12 months
+         ocn_frc_d      ! ocn data for 365 days
 
       logical (kind=log_kind), public :: &
          restore_ocn                 ! restore sst if true
@@ -293,7 +296,8 @@
           frain_data(nx_block,ny_block,2,max_blocks), &
         topmelt_data(nx_block,ny_block,2,max_blocks,ncat), &
         botmelt_data(nx_block,ny_block,2,max_blocks,ncat), &
-           ocn_frc_m(nx_block,ny_block,  max_blocks,nfld,12), & ! ocn data for 12 months
+           ocn_frc_m(nx_block,ny_block,  max_blocks,nfld,12), & ! ocn data for 12 monthsi
+           ocn_frc_d(nx_block,ny_block,  max_blocks,nfld,365), &
         topmelt_file(ncat), &
         botmelt_file(ncat), &
         wave_spectrum_data(nx_block,ny_block,nfreq,2,max_blocks), &
@@ -617,7 +621,10 @@
       elseif (trim(ocn_data_type) == 'ncar') then
          call ocn_data_ncar_init
 !        call ocn_data_ncar_init_3D
-
+      elseif (trim(ocn_data_type) == 'ncar_daily') then
+	 call ocn_data_ncar_daily_init
+      elseif (trim(ocn_data_type) == 'ncar_daily_coupled') then
+	 call ocn_data_ncar_daily_init
       elseif (trim(ocn_data_type) == 'hycom') then
          call ocn_data_hycom_init
 
@@ -852,6 +859,10 @@
       elseif (trim(ocn_data_type) == 'ncar' .or.  &
               trim(ocn_data_type) == 'ISPOL') then
          call ocn_data_ncar(dt)
+      elseif (trim(ocn_data_type) == 'ncar_daily') then 
+	 call ocn_data_ncar_daily(dt)
+      elseif (trim(ocn_data_type) == 'ncar_daily_coupled') then 
+	 call ocn_data_ncar_daily_coupled(dt)
       elseif (trim(ocn_data_type) == 'hadgem_sst' .or.  &
               trim(ocn_data_type) == 'hadgem_sst_uvocn') then
          call ocn_data_hadgem(dt)
@@ -3879,6 +3890,172 @@
 !echmod
 
       end subroutine ocn_data_ncar_init
+      
+!--------------------------------------------------------------
+!  Daily avaeraged sea data hacked version of ocn_data_ncar_init
+!--------------------------------------------------------------
+      
+      subroutine ocn_data_ncar_daily_init
+
+! Reads NCAR pop ocean forcing data set 'pop_frc_gx1v3_010815.nc'
+!
+! List of ocean forcing fields: Note that order is important!
+! (order is determined by field list in vname).
+!
+! For ocean mixed layer-----------------------------units
+!
+! 1  sst------temperature---------------------------(C)
+! 2  sss------salinity------------------------------(ppt)
+! 3  hbl------depth---------------------------------(m)
+! 4  u--------surface u current---------------------(m/s)
+! 5  v--------surface v current---------------------(m/s)
+! 6  dhdx-----surface tilt x direction--------------(m/m)
+! 7  dhdy-----surface tilt y direction--------------(m/m)
+! 8  qdp------ocean sub-mixed layer heat flux-------(W/m2)
+!
+! Fields 4, 5, 6, 7 are on the U-grid; 1, 2, 3, and 8 are
+! on the T-grid.
+
+! authors: Bruce Briegleb, NCAR
+!          Elizabeth Hunke, LANL
+
+      use ice_blocks, only: nx_block, ny_block
+      use ice_domain_size, only: max_blocks
+#ifdef USE_NETCDF
+      use netcdf
+#endif
+
+      integer (kind=int_kind) :: &
+        n   , & ! field index
+        m   , & ! month index
+        nrec, & ! record number for direct access
+        nbits
+
+      character(char_len) :: &
+        vname(nfld) ! variable names to search for in file
+      data vname /  &
+           'T',      'S',      'hblt',  'U',     'V', &
+           'dhdx',   'dhdy',   'qdp' /
+
+      integer (kind=int_kind) :: &
+        status  , & ! status flag
+        fid     , & ! file id
+        dimid   , & ! dimension id
+        nlat    , & ! number of longitudes of data
+        nlon        ! number of latitudes  of data
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_ncar_daily_init)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      if (my_task == master_task) then
+
+         write (nu_diag,*) 'WARNING: evp_prep calculates surface tilt'
+         write (nu_diag,*) 'WARNING: stress from geostrophic currents,'
+         write (nu_diag,*) 'WARNING: not data from ocean forcing file.'
+         write (nu_diag,*) 'WARNING: Alter ice_dyn_evp.F90 if desired.'
+
+         if (restore_ocn) write (nu_diag,*)  &
+             'SST restoring timescale = ',trestore,' days'
+
+         sst_file = trim(ocn_data_dir)//'/'//trim(oceanmixed_file) ! not just sst
+
+        !---------------------------------------------------------------
+        ! Read in ocean forcing data from an existing file
+        !---------------------------------------------------------------
+        write (nu_diag,*) 'ocean mixed layer forcing data file = ', &
+                           trim(sst_file)
+
+      endif ! master_task
+
+      if (trim(ocn_data_format) == 'nc') then
+#ifdef USE_NETCDF
+        if (my_task == master_task) then
+          call ice_open_nc(sst_file, fid)
+
+!          status = nf90_inq_dimid(fid,'nlon',dimid)
+          status = nf90_inq_dimid(fid,'ni',dimid)
+          status = nf90_inquire_dimension(fid,dimid,len=nlon)
+
+!          status = nf90_inq_dimid(fid,'nlat',dimid)
+          status = nf90_inq_dimid(fid,'nj',dimid)
+          status = nf90_inquire_dimension(fid,dimid,len=nlat)
+
+          if( nlon .ne. nx_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlon ne nx_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+          if( nlat .ne. ny_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlat ne ny_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+
+        endif ! master_task
+	
+        ! Read in ocean forcing data for all 12 months
+        !print *, 'Fields to read in...'
+        !do n=1,nfld
+        !   print *, vname(n)
+        !enddo
+        !print *, 'Reaching here'
+        do n=1,nfld
+          do m=1,365
+	    !print *, 'm :',m
+            !print *, 'Attempting to read in ocean file field ', vname(n)
+            ! Note: netCDF does single to double conversion if necessary
+!           if (n >= 4 .and. n <= 7) then
+!              call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+!                               field_loc_NEcorner, field_type_vector)
+!           else
+               call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+					field_loc_center, field_type_scalar)
+!           endif
+
+            ocn_frc_d(:,:,:,n,m) = work1(:,:,:)
+
+          enddo               ! month loop
+        enddo               ! field loop
+
+        
+        if (my_task == master_task) call ice_close_nc(fid)
+#else
+      call abort_ice(subname//'ERROR: USE_NETCDF cpp not defined for '//trim(sst_file), &
+          file=__FILE__, line=__LINE__)
+#endif
+
+      else  ! binary format
+
+        nbits = 64
+        call ice_open (nu_forcing, sst_file, nbits)
+
+        nrec = 0
+        do n=1,nfld
+           do m=1,365
+              nrec = nrec + 1
+              
+              if (n >= 4 .and. n <= 7) then
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_NEcorner, field_type_vector)
+              else
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_center, field_type_scalar)
+              endif
+              ocn_frc_d(:,:,:,n,m) = work1(:,:,:)
+           enddo               ! month loop
+        enddo               ! field loop
+        close (nu_forcing)
+
+      endif
+
+!echmod - currents cause Fram outflow to be too large
+!             ocn_frc_m(:,:,:,4,:) = c0
+!             ocn_frc_m(:,:,:,5,:) = c0
+!echmod
+
+      end subroutine ocn_data_ncar_daily_init
 
 !=======================================================================
 
@@ -4130,7 +4307,7 @@
         ! masking by hm is necessary due to NaNs in the data file
         do j = 1, ny_block
           do i = 1, nx_block
-            if (n == 2) sss    (i,j,:) = c0
+            !if (n == 2) sss    (i,j,:) = c0
             if (n == 3) hmix   (i,j,:) = c0
             if (n == 4) uocn   (i,j,:) = c0
             if (n == 5) vocn   (i,j,:) = c0
@@ -4139,7 +4316,11 @@
             if (n == 8) qdp    (i,j,:) = c0
             do iblk = 1, nblocks
               if (hm(i,j,iblk) == c1) then
-                if (n == 2) sss    (i,j,iblk) = work1(i,j,iblk)
+                if (restore_ocn) then
+		    !if (n == 2) sss(i,j,:)  = real(.75)*sss(i,j,:) + real(.25)*work1(i,j,:)
+		    if (n==2) sss(i,j,iblk)  = sss(i,j,iblk) + (work1(i,j,iblk)-sss(i,j,iblk))*(dt/trest)
+		    !if (n == 2) sss(i,j,:)  = max(sss(i,j,:),real(20))
+		endif
                 if (n == 3) hmix   (i,j,iblk) = max(mixed_layer_depth_default,work1(i,j,iblk))
                 if (n == 4) uocn   (i,j,iblk) = work1(i,j,iblk)
                 if (n == 5) vocn   (i,j,iblk) = work1(i,j,iblk)
@@ -4231,6 +4412,445 @@
 
       end subroutine ocn_data_ncar
 
+ !=======================================================================
+
+      subroutine ocn_data_ncar_daily(dt)
+
+! Interpolate monthly ocean data to timestep.
+! Restore sst if desired. sst is updated with surface fluxes in ice_ocean.F.
+      use ice_calendar, only: timesecs
+      use ice_blocks, only: nx_block, ny_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_domain_size, only: max_blocks
+      use ice_flux, only: sss, sst, Tf, uocn, vocn, ss_tltx, ss_tlty, &
+            qdp, hmix
+      use ice_restart_shared, only: restart
+      use ice_grid, only: hm, tmask, umask
+
+      real (kind=dbl_kind), intent(in) :: &
+         dt      ! time step
+	
+      integer (kind=int_kind) :: &
+          i, j, n, iblk   , &
+          ixm,ixp         , & ! record numbers for neighboring months
+          maxrec          , & ! maximum record number
+          recslot         , & ! spline slot for current record
+          midmonth        , & ! middle day of month
+          current_day_indx, & ! current day in the year
+          next_day_indx	      ! next day in the year
+
+      real (kind=dbl_kind) :: &
+          vmin, vmax
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_ncar_daily)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+    !-------------------------------------------------------------------
+    ! monthly data
+    !
+    ! Assume that monthly data values are located in the middle of the
+    ! month.
+    !-------------------------------------------------------------------
+
+      midmonth = 15  ! data is given on 15th of every month
+!      midmonth = fix(p5 * real(daymo(mmonth),kind=dbl_kind))  ! exact middle
+
+      ! Compute record numbers for surrounding months
+      maxrec = 12
+      ixm  = mod(mmonth+maxrec-2,maxrec) + 1
+      ixp  = mod(mmonth,         maxrec) + 1
+      if (mday >= midmonth) ixm = -99  ! other two points will be used
+      if (mday <  midmonth) ixp = -99
+
+      ! Determine whether interpolation will use values 1:2 or 2:3
+      ! recslot = 2 means we use values 1:2, with the current value (2)
+      !  in the second slot
+      ! recslot = 1 means we use values 2:3, with the current value (2)
+      !  in the first slot
+      recslot = 1                             ! latter half of month
+      if (mday < midmonth) recslot = 2        ! first half of month
+
+      ! Find interpolation coefficients
+      !call interp_coeff_monthly (recslot)
+      c1intp = real(mod(int(timesecs),86400))/real(86400)
+      c2intp = 1-c1intp
+      !print *, 'time', int(timesecs)
+      !print *, 'c1intp: ', c1intp
+      !print *, 'c2intp: ', c2intp
+      
+      sst_data(:,:,:,:) = c0
+      
+      !print *, 'ixm :',ixm,' , ixp :',ixp,' , mmonth :',mmonth,' , mday:',mday
+      !print *, 'current_day: ', daycal(mmonth) + mday
+      
+!       print *, '(dt/trest),trest,trestore,dt : ', (dt/trest),trest,trestore,dt
+      
+      current_day_indx = MOD(daycal(mmonth) + mday,365);
+      if (current_day_indx == 0) current_day_indx = 365
+      next_day_indx = MOD(current_day_indx + 1 , 365);
+      if (next_day_indx == 0) next_day_indx = 365
+      !print *, 'current_day: ',current_day_indx
+      !print *, 'next_day   : ',next_day_indx
+      
+      do n = nfld, 1, -1
+        do iblk = 1, nblocks
+	  sst_data(:,:,1,iblk) = ocn_frc_d(:,:,iblk,n,current_day_indx);
+	  sst_data(:,:,2,iblk) = ocn_frc_d(:,:,iblk,n,next_day_indx);
+	  work1(:,:,iblk)      = c1intp*sst_data(:,:,1,iblk) + c2intp*sst_data(:,:,2,iblk)
+        ! use sst_data arrays as temporary work space until n=1
+        !if (ixm /= -99) then  ! first half of month
+          !sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,ixm)
+          !sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+        !else                 ! second half of month
+          !sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+          !sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,ixp)
+        !endif
+        enddo
+	
+	
+        !call interpolate_data (sst_data,work1)
+        ! masking by hm is necessary due to NaNs in the data file
+        do j = 1, ny_block
+          do i = 1, nx_block
+            !if (n == 2) sss    (i,j,:) = c0
+            if (n == 3) hmix   (i,j,:) = c0
+            if (n == 4) uocn   (i,j,:) = c0
+            if (n == 5) vocn   (i,j,:) = c0
+            if (n == 6) ss_tltx(i,j,:) = c0
+            if (n == 7) ss_tlty(i,j,:) = c0
+            if (n == 8) qdp    (i,j,:) = c0
+            
+            do iblk = 1, nblocks
+              if (hm(i,j,iblk) == c1) then
+		if (restore_ocn) then
+		    !if (n == 2) sss(i,j,:)  = real(.75)*sss(i,j,:) + real(.25)*work1(i,j,:)
+		    if (n==2) sss(i,j,iblk)  =  sss(i,j,iblk) + (work1(i,j,iblk)-sss(i,j,iblk))*(dt/trest) !work1(i,j,iblk)!
+		    !if (n == 2) sss(i,j,:)  = max(sss(i,j,:),real(20))
+		endif
+                !if (n == 2) sss    (i,j,iblk) = work1(i,j,iblk)
+                if (n == 3) hmix   (i,j,iblk) = min(real(50),max(real(5),work1(i,j,iblk)))!max(mixed_layer_depth_default,work1(i,j,iblk))
+                if (n == 4) uocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 5) vocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 6) ss_tltx(i,j,iblk) = work1(i,j,iblk)
+                if (n == 7) ss_tlty(i,j,iblk) = work1(i,j,iblk)
+                if (n == 8) qdp    (i,j,iblk) =  work1(i,j,iblk) !+ real(75)
+              endif
+            enddo
+          enddo
+        enddo
+      enddo
+      
+      do j = 1, ny_block
+         do i = 1, nx_block
+            sss (i,j,:) = max (sss(i,j,:), c0)
+            hmix(i,j,:) = max(hmix(i,j,:), c0)
+	 enddo
+      enddo
+
+      call ocn_freezing_temperature
+
+      if (restore_ocn) then
+	!print *, 'dt/trest   ', dt/trestore
+	
+        do j = 1, ny_block
+         do i = 1, nx_block
+           !sst(i,j,:) = work1(i,j,:) 
+           !sst(i,j,:) = real(.95)*sst(i,j,:) + real(.05)*(work1(i,j,:))
+           !sss(i,j,:)  = max(sss(i,j,:) + real(.25)*(work1(i,j,:)-sss(i,j,:))*dt/trest,real(20))
+           sst(i,j,:)  = sst(i,j,:) + (work1(i,j,:)-sst(i,j,:))*dt/trest
+         enddo
+        enddo
+!     else sst is only updated in ice_ocean.F
+      endif
+
+      ! initialize sst properly on first step
+      if (istep1 <= 1 .and. .not. (restart)) then
+        call interpolate_data (sst_data,sst)
+        !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+        do iblk = 1, nblocks
+         do j = 1, ny_block
+          do i = 1, nx_block
+            if (hm(i,j,iblk) == c1) then
+              sst(i,j,iblk) =  max (sst(i,j,iblk), Tf(i,j,iblk))
+            else
+              sst(i,j,iblk) = c0
+            endif
+          enddo
+         enddo
+        enddo
+        !$OMP END PARALLEL DO
+      endif
+
+      if (debug_forcing) then
+         if (my_task == master_task)  &
+               write (nu_diag,*) 'ocn_data_ncar_daily'
+           vmin = global_minval(Tf,distrb_info,tmask)
+           vmax = global_maxval(Tf,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'Tf',vmin,vmax
+           vmin = global_minval(sst,distrb_info,tmask)
+           vmax = global_maxval(sst,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sst',vmin,vmax
+           vmin = global_minval(sss,distrb_info,tmask)
+           vmax = global_maxval(sss,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sss',vmin,vmax
+           vmin = global_minval(hmix,distrb_info,tmask)
+           vmax = global_maxval(hmix,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'hmix',vmin,vmax
+           vmin = global_minval(uocn,distrb_info,umask)
+           vmax = global_maxval(uocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'uocn',vmin,vmax
+           vmin = global_minval(vocn,distrb_info,umask)
+           vmax = global_maxval(vocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'vocn',vmin,vmax
+           vmin = global_minval(ss_tltx,distrb_info,umask)
+           vmax = global_maxval(ss_tltx,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'ss_tltx',vmin,vmax
+           vmin = global_minval(ss_tlty,distrb_info,umask)
+           vmax = global_maxval(ss_tlty,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'ss_tlty',vmin,vmax
+           vmin = global_minval(qdp,distrb_info,tmask)
+           vmax = global_maxval(qdp,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'qdp',vmin,vmax
+      endif
+
+      end subroutine ocn_data_ncar_daily 
+      
+      
+      
+      subroutine ocn_data_ncar_daily_coupled(dt)
+
+! Interpolate monthly ocean data to timestep.
+! Restore sst if desired. sst is updated with surface fluxes in ice_ocean.F.
+      use ice_calendar, only: timesecs
+      use ice_blocks, only: nx_block, ny_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_domain_size, only: max_blocks
+      use ice_flux, only: sss, sst, Tf, uocn, vocn, ss_tltx, ss_tlty, &
+            qdp, hmix
+      use ice_restart_shared, only: restart
+      use ice_grid, only: hm, tmask, umask
+
+      real (kind=dbl_kind), intent(in) :: &
+         dt      ! time step
+	
+      integer (kind=int_kind) :: &
+          i, j, n, iblk   , &
+          ixm,ixp         , & ! record numbers for neighboring months
+          maxrec          , & ! maximum record number
+          recslot         , & ! spline slot for current record
+          midmonth        , & ! middle day of month
+          current_day_indx, & ! current day in the year
+          next_day_indx	      ! next day in the year
+
+      real (kind=dbl_kind) :: &
+          vmin, vmax
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_ncar_daily)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+    !-------------------------------------------------------------------
+    ! monthly data
+    !
+    ! Assume that monthly data values are located in the middle of the
+    ! month.
+    !-------------------------------------------------------------------
+      !if (trestore == 0) then 
+	!trestore = dt
+      !end
+      
+      if (mod(int(istep1*dt),int(trestore)) == 0) then
+	!print *, '(dt/trest),trest,trestore,dt : ', (dt/trest),trest,trestore,dt
+	midmonth = 15  ! data is given on 15th of every month
+  !      midmonth = fix(p5 * real(daymo(mmonth),kind=dbl_kind))  ! exact middle
+
+	! Compute record numbers for surrounding months
+	maxrec = 12
+	ixm  = mod(mmonth+maxrec-2,maxrec) + 1
+	ixp  = mod(mmonth,         maxrec) + 1
+	if (mday >= midmonth) ixm = -99  ! other two points will be used
+	if (mday <  midmonth) ixp = -99
+
+	! Determine whether interpolation will use values 1:2 or 2:3
+	! recslot = 2 means we use values 1:2, with the current value (2)
+	!  in the second slot
+	! recslot = 1 means we use values 2:3, with the current value (2)
+	!  in the first slot
+	recslot = 1                             ! latter half of month
+	if (mday < midmonth) recslot = 2        ! first half of month
+
+	! Find interpolation coefficients
+	!call interp_coeff_monthly (recslot)
+	c1intp = real(mod(int(timesecs),86400))/real(86400)
+	c2intp = 1-c1intp
+	!print *, 'time', int(timesecs)
+	!print *, 'c1intp: ', c1intp
+	!print *, 'c2intp: ', c2intp
+	
+	sst_data(:,:,:,:) = c0
+	
+	!print *, 'ixm :',ixm,' , ixp :',ixp,' , mmonth :',mmonth,' , mday:',mday
+	!print *, 'current_day: ', daycal(mmonth) + mday
+	
+  !       print *, '(dt/trest),trest,trestore,dt : ', (dt/trest),trest,trestore,dt
+	
+	current_day_indx = MOD(daycal(mmonth) + mday,365);
+	if (current_day_indx == 0) current_day_indx = 365
+	next_day_indx = MOD(current_day_indx + 1 , 365);
+	if (next_day_indx == 0) next_day_indx = 365
+	!print *, 'current_day: ',current_day_indx
+	!print *, 'next_day   : ',next_day_indx
+	
+	do n = nfld, 1, -1
+	  do iblk = 1, nblocks
+	    sst_data(:,:,1,iblk) = ocn_frc_d(:,:,iblk,n,current_day_indx);
+	    sst_data(:,:,2,iblk) = ocn_frc_d(:,:,iblk,n,next_day_indx);
+	    work1(:,:,iblk)      = c1intp*sst_data(:,:,1,iblk) + c2intp*sst_data(:,:,2,iblk)
+	  ! use sst_data arrays as temporary work space until n=1
+	  !if (ixm /= -99) then  ! first half of month
+	    !sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,ixm)
+	    !sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+	  !else                 ! second half of month
+	    !sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+	    !sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,ixp)
+	  !endif
+	  enddo
+	  
+	  
+	  !call interpolate_data (sst_data,work1)
+	  ! masking by hm is necessary due to NaNs in the data file
+	  do j = 1, ny_block
+	    do i = 1, nx_block
+	      if (n == 2) sss    (i,j,:) = c0
+	      if (n == 3) hmix   (i,j,:) = c0
+	      if (n == 4) uocn   (i,j,:) = c0
+	      if (n == 5) vocn   (i,j,:) = c0
+	      if (n == 6) ss_tltx(i,j,:) = c0
+	      if (n == 7) ss_tlty(i,j,:) = c0
+	      if (n == 8) qdp    (i,j,:) = c0
+	      
+	      do iblk = 1, nblocks
+		if (hm(i,j,iblk) == c1) then
+		  if (restore_ocn) then
+		      if (n==2) sss(i,j,iblk)  = work1(i,j,iblk)
+		  endif
+		  !if (n == 2) sss    (i,j,iblk) = work1(i,j,iblk)
+		  if (n == 3) hmix   (i,j,iblk) = min(real(50),max(real(5),work1(i,j,iblk)))!max(mixed_layer_depth_default,work1(i,j,iblk))
+		  if (n == 4) uocn   (i,j,iblk) = work1(i,j,iblk)
+		  if (n == 5) vocn   (i,j,iblk) = work1(i,j,iblk)
+		  if (n == 6) ss_tltx(i,j,iblk) = work1(i,j,iblk)
+		  if (n == 7) ss_tlty(i,j,iblk) = work1(i,j,iblk)
+		  if (n == 8) qdp    (i,j,iblk) =  work1(i,j,iblk) !+ real(75)
+		endif
+	      enddo
+	    enddo
+	  enddo
+	enddo
+	
+	do j = 1, ny_block
+	  do i = 1, nx_block
+	      sss (i,j,:) = max (sss(i,j,:), c0)
+	      hmix(i,j,:) = max(hmix(i,j,:), c0)
+	  enddo
+	enddo
+
+	call ocn_freezing_temperature
+
+	if (restore_ocn) then
+	  !print *, 'dt/trest   ', dt/trestore
+	  
+	  do j = 1, ny_block
+	  do i = 1, nx_block
+	    !sst(i,j,:) = work1(i,j,:) 
+	    !sst(i,j,:) = real(.95)*sst(i,j,:) + real(.05)*(work1(i,j,:))
+	    !sss(i,j,:)  = max(sss(i,j,:) + real(.25)*(work1(i,j,:)-sss(i,j,:))*dt/trest,real(20))
+	    sst(i,j,:)  = work1(i,j,:)
+	  enddo
+	  enddo
+  !     else sst is only updated in ice_ocean.F
+	endif
+
+	! initialize sst properly on first step
+	if (istep1 <= 1 .and. .not. (restart)) then
+	  call interpolate_data (sst_data,sst)
+	  !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+	  do iblk = 1, nblocks
+	  do j = 1, ny_block
+	    do i = 1, nx_block
+	      if (hm(i,j,iblk) == c1) then
+		sst(i,j,iblk) =  max (sst(i,j,iblk), Tf(i,j,iblk))
+	      else
+		sst(i,j,iblk) = c0
+	      endif
+	    enddo
+	  enddo
+	  enddo
+	  !$OMP END PARALLEL DO
+	endif
+
+	if (debug_forcing) then
+	  if (my_task == master_task)  &
+		write (nu_diag,*) 'ocn_data_ncar_daily_coupled'
+	    vmin = global_minval(Tf,distrb_info,tmask)
+	    vmax = global_maxval(Tf,distrb_info,tmask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'Tf',vmin,vmax
+	    vmin = global_minval(sst,distrb_info,tmask)
+	    vmax = global_maxval(sst,distrb_info,tmask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'sst',vmin,vmax
+	    vmin = global_minval(sss,distrb_info,tmask)
+	    vmax = global_maxval(sss,distrb_info,tmask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'sss',vmin,vmax
+	    vmin = global_minval(hmix,distrb_info,tmask)
+	    vmax = global_maxval(hmix,distrb_info,tmask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'hmix',vmin,vmax
+	    vmin = global_minval(uocn,distrb_info,umask)
+	    vmax = global_maxval(uocn,distrb_info,umask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'uocn',vmin,vmax
+	    vmin = global_minval(vocn,distrb_info,umask)
+	    vmax = global_maxval(vocn,distrb_info,umask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'vocn',vmin,vmax
+	    vmin = global_minval(ss_tltx,distrb_info,umask)
+	    vmax = global_maxval(ss_tltx,distrb_info,umask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'ss_tltx',vmin,vmax
+	    vmin = global_minval(ss_tlty,distrb_info,umask)
+	    vmax = global_maxval(ss_tlty,distrb_info,umask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'ss_tlty',vmin,vmax
+	    vmin = global_minval(qdp,distrb_info,tmask)
+	    vmax = global_maxval(qdp,distrb_info,tmask)
+	    if (my_task.eq.master_task)  &
+		write (nu_diag,*) 'qdp',vmin,vmax
+	endif
+      endif
+
+      end subroutine ocn_data_ncar_daily_coupled
+      
+      
 !=======================================================================
 ! ocean data for oned configuration
 ! Current (released) values are the same as the defaults (ice_flux.F90)
